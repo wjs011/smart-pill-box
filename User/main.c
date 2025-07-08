@@ -577,56 +577,97 @@ void show_environment_screen(void)
 }
 
 // 优化警报显示函数
-void show_alert_screen(u8 alert_type)
+void show_alert_screen(u8 alert_type) 
 {
     char med_info[50];
     char alert_msg[50];
-
+    char time_str[20];
+    
     // 只在状态变化时重新绘制
-    if (force_refresh || last_state != alert_type)
+    if (force_refresh || last_state != alert_type) 
     {
-        if (alert_type == STATE_ALARM)
+        // 先获取当前时间
+        sprintf(time_str, "%02d:%02d", calendar.hour, calendar.min);
+        
+        if (alert_type == STATE_ALARM) 
         {
             LCD_Clear(YELLOW);
             FRONT_COLOR = RED;
-            LCD_ShowString(60, 60, 200, 40, 32, (u8 *)"Take Medicine!");
-            sprintf(med_info, "Time: %s", medicines[system_state.next_med_index].name);
+            BACK_COLOR = YELLOW;
+            
+            // 显示大号警报标题
+            LCD_ShowString(30, 40, 240, 50, 36, (u8 *)"MEDICATION ALERT!");
+            
+            // 显示药物信息
+            FRONT_COLOR = BLUE;
+            LCD_ShowString(50, 100, 200, 30, 24, (u8 *)"Medicine:");
             FRONT_COLOR = BLACK;
-            LCD_ShowString(50, 120, 200, 30, 24, (u8 *)med_info);
-            LCD_ShowString(30, 180, 200, 30, 16, (u8 *)"Please take now!");
-            LCD_ShowString(60, 210, 200, 30, 16, (u8 *)"Please take now!");
-        }
-        else if (alert_type == STATE_MED_TAKEN)
+            LCD_ShowString(150, 100, 200, 30, 24, (u8 *)medicines[system_state.next_med_index].name);
+            
+            // 显示时间信息
+            FRONT_COLOR = BLUE;
+            LCD_ShowString(50, 140, 200, 30, 24, (u8 *)"Scheduled Time:");
+            FRONT_COLOR = BLACK;
+            sprintf(med_info, "%02d:%02d", medicines[system_state.next_med_index].hour, 
+                                          medicines[system_state.next_med_index].minute);
+            LCD_ShowString(200, 140, 200, 30, 24, (u8 *)med_info);
+            
+            // 显示当前时间
+            FRONT_COLOR = BLUE;
+            LCD_ShowString(50, 180, 200, 30, 24, (u8 *)"Current Time:");
+            FRONT_COLOR = BLACK;
+            LCD_ShowString(180, 180, 200, 30, 24, (u8 *)time_str);
+            
+            // 操作提示
+            FRONT_COLOR = RED;
+            LCD_ShowString(30, 220, 240, 30, 24, (u8 *)"Take medicine or press UP");
+        } 
+        else if (alert_type == STATE_MED_TAKEN) 
         {
             LCD_Clear(GREEN);
             FRONT_COLOR = BLUE;
-            LCD_ShowString(60, 60, 200, 40, 32, (u8 *)"Taken!");
-            sprintf(med_info, "%s Taken", medicines[system_state.next_med_index].name);
+            BACK_COLOR = GREEN;
+            
+            // 显示确认信息
+            LCD_ShowString(80, 80, 200, 50, 36, (u8 *)"MEDICATION TAKEN");
+            
+            // 显示药物信息
             FRONT_COLOR = BLACK;
-            LCD_ShowString(50, 120, 200, 30, 24, (u8 *)med_info);
-            LCD_ShowString(80, 180, 200, 30, 16, (u8 *)"Press KEY_UP to return");
-        }
-        else if (alert_type == STATE_ENV_ALERT)
+            sprintf(med_info, "%s at %s", 
+                    medicines[system_state.next_med_index].name, time_str);
+            LCD_ShowString(40, 150, 240, 30, 24, (u8 *)med_info);
+            
+            // 操作提示
+            FRONT_COLOR = BLUE;
+            LCD_ShowString(60, 200, 200, 30, 24, (u8 *)"Press UP to return");
+        } 
+        else if (alert_type == STATE_ENV_ALERT) 
         {
             LCD_Clear(RED);
             FRONT_COLOR = WHITE;
-            LCD_ShowString(60, 60, 200, 40, 32, (u8 *)"Env Alert!");
-            if (system_state.temperature > 30.0)
-            {
-                sprintf(alert_msg, "Temp High: %.1fC", system_state.temperature);
+            BACK_COLOR = RED;
+            
+            // 显示警报标题
+            LCD_ShowString(60, 40, 240, 50, 36, (u8 *)"ENVIRONMENT ALERT!");
+            
+            // 显示具体警报信息
+            if (system_state.temperature > 30.0) {
+                sprintf(alert_msg, "HIGH TEMP: %.1fC", system_state.temperature);
+            } else if (system_state.temperature < 10.0) {
+                sprintf(alert_msg, "LOW TEMP: %.1fC", system_state.temperature);
+            } else {
+                sprintf(alert_msg, "HIGH HUMI: %.1f%%", system_state.humidity);
             }
-            else if (system_state.temperature < 10.0)
-            {
-                sprintf(alert_msg, "Temp Low: %.1fC", system_state.temperature);
-            }
-            else
-            {
-                sprintf(alert_msg, "Humi Alert: %.1f%%", system_state.humidity);
-            }
-            LCD_ShowString(30, 120, 200, 30, 24, (u8 *)alert_msg);
-            LCD_ShowString(30, 160, 200, 30, 16, (u8 *)"Please check!");
-            LCD_ShowString(60, 190, 200, 30, 16, (u8 *)"Press KEY_UP to return");
+            LCD_ShowString(50, 100, 240, 30, 24, (u8 *)alert_msg);
+            
+            // 显示当前时间
+            LCD_ShowString(50, 140, 240, 30, 24, (u8 *)time_str);
+            
+            // 操作提示
+            LCD_ShowString(30, 200, 240, 30, 24, (u8 *)"Check environment!");
+            LCD_ShowString(60, 240, 200, 30, 24, (u8 *)"Press UP to return");
         }
+        
         last_state = alert_type;
     }
 }
@@ -756,14 +797,37 @@ int main(void)
         // 设备控制逻辑 - 区分系统警报和蓝牙控制
         if (system_state.current_state == STATE_ALARM)
         {
-            BEEP = 1;
-            LED1 = !LED1; // 闪烁
-            handle_medication();
+             BEEP = 1;           // 蜂鸣器响
+        LED1 = !LED1;       // LED闪烁(500ms周期)
+        LED2 = 0;
+        handle_medication(); // 处理服药动作
+        
+        // 每5秒发送一次提醒
+        if (current_second % 5 == 0 && last_second != current_second) {
+            sprintf(msg, "ALARM:%s,%02d:%02d", 
+                   medicines[system_state.next_med_index].name,
+                   medicines[system_state.next_med_index].hour,
+                   medicines[system_state.next_med_index].minute);
+            Bluetooth_Send(msg);
+        }
         }
         else if (system_state.current_state == STATE_ENV_ALERT)
         {
-            BEEP = 1;
-            LED2 = 0; // 低电平点亮，作为环境警报指示
+            BEEP = (current_second % 2); // 蜂鸣器间歇响(1秒周期)
+        LED1 = 0;
+        LED2 = 1;           // LED2常亮
+        
+        // 每10秒发送一次环境警报
+        if (current_second % 10 == 0 && last_second != current_second) {
+            if (system_state.temperature > 30.0) {
+                sprintf(msg, "ENV_ALERT:HIGH_TEMP,%.1fC", system_state.temperature);
+            } else if (system_state.temperature < 10.0) {
+                sprintf(msg, "ENV_ALERT:LOW_TEMP,%.1fC", system_state.temperature);
+            } else {
+                sprintf(msg, "ENV_ALERT:HIGH_HUMI,%.1f%%", system_state.humidity);
+            }
+            Bluetooth_Send(msg);
+        }
         }
         else
         {
