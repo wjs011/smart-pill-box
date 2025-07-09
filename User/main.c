@@ -7,15 +7,18 @@
 #include "key.h"
 #include "rtc.h"
 #include "stdlib.h"
-#include "stdio.h"  // 添加stdio.h支持printf
-#include "string.h" // 添加string.h支持memcpy和memset
-#include "dht11.h"  // 温湿度传感器驱动
-#include "beep.h"   // 蜂鸣器驱动
+#include "stdio.h"
+#include "string.h"
+#include "dht11.h"
+#include "beep.h"
 #include "hc05.h"
 #include "usart3.h"
-#include "stm32f10x_exti.h" // 外部中断相关
-#include "misc.h"           // NVIC相关
+#include "stm32f10x_exti.h"
+#include "misc.h"
+#include "stm32f10x_adc.h" // 添加ADC支持
+#include "lsens.h"
 #include "hwjs.h"
+
 // 系统状态定义
 #define STATE_NORMAL 0
 #define STATE_ALARM 1
@@ -57,6 +60,7 @@
 #define IR_KEY8 0x00FF4AB5 // 按键8的编码 
 #define IR_KEY9 0x00FF52AD // 按键9的编码
 
+
 // 药物信息结构体
 typedef struct
 {
@@ -75,22 +79,25 @@ struct SystemState
     u8 next_med_index; // 下一个要服用的药物索引
     float temperature; // 当前温度
     float humidity;    // 当前湿度
+	  u8 light_intensity;// 光照强度（0-100%）
     u8 bt_led1_ctrl;   // 蓝牙控制LED1状态
     u8 bt_led2_ctrl;   // 蓝牙控制LED2状态
     u8 bt_beep_ctrl;   // 蓝牙控制蜂鸣器状态
 } system_state;
 
-// 药物时间表(可根据需要修改)
+// 药物时间表
 Medicine medicines[] = {
     {"Vitamins", 8, 0, 0},
     {"Anti_drugs", 12, 30, 0},
     {"Calcium_tablets", 19, 0, 0}};
 
-// 红外传感器计数器(用于检测取药动作)
-u32 ir_sensor_count = 0;
+// 光敏传感器计数器(用于检测取药动作)
+u32 light_sensor_count = 0;
+u16 light_base_value = 0;  // 基准光强值
+u16 light_threshold = 100; // 光强变化阈值
+u16 current_light_value = 0;
 
-// 全局变量声明(添加在文件顶部变量声明区域)
-// 屏幕状态管理变量
+// 全局变量声明
 u8 last_screen = 0xFF;         // 上一次显示的屏幕
 u8 last_state = 0xFF;          // 上一次的系统状态
 u8 last_minute_display = 0xFF; // 上一次显示更新的分钟数
@@ -108,20 +115,16 @@ u8 bt_send_cnt = 0;  // 蓝牙发送计数器
 void show_home_screen(void);
 void show_medication_screen(void);
 void show_environment_screen(void);
-void show_alert_screen(u8 alert_type);
+void show_alert_screen(u8 alert_type); 
 void bluetooth_data_process(void);     // 蓝牙数据处理函数
 void bluetooth_cmd_handler(char *cmd); // 蓝牙命令处理函数
+void Bluetooth_Send(const char *msg);
 void send_device_status(void);         // 发送设备状态函数
 void simple_bluetooth_test(void);      // 简单蓝牙测试函数
 void HC05_Role_Show(void);             // 显示HC05主从状态
 void HC05_Sta_Show(void);              // 显示HC05连接状态
-
-// 文件顶部声明外部函数
-void USART1_Init(u32 bound);
-void USART3_Init(u32 bound);
-void BEEP_Init(void);
-u8 HC05_Init(void);
-void Bluetooth_Send(const char *msg);
+u16 Read_Light_Sensor(void);           // 读取光敏传感器值
+void update_light_threshold(void);     // 更新光强阈值
 
 // 系统初始化函数
 void system_init(void)
@@ -135,6 +138,85 @@ void system_init(void)
     system_state.bt_led1_ctrl = 0; // 初始化蓝牙LED控制状态
     system_state.bt_led2_ctrl = 0;
     system_state.bt_beep_ctrl = 0;
+		system_state.light_intensity = 0; // 光照强度初始化为0
+}
+
+
+
+// 读取光敏传感器值
+u16 Read_Light_Sensor(void)
+{
+    while(ADC_GetFlagStatus(ADC1, ADC_FLAG_EOC) == RESET);
+    return ADC_GetConversionValue(ADC1);
+}
+
+// 更新光强阈值
+void update_light_threshold(void)
+{
+    static u16 light_values[10];
+    static u8 index = 0;
+    u32 sum = 0;
+    u32 avg = 0;
+    u32 variance = 0;
+    u8 i;
+    
+    // 保存当前值
+    light_values[index] = current_light_value;
+    index = (index + 1) % 10;
+    
+    // 计算平均值
+    for(i = 0; i < 10; i++) {
+        sum += light_values[i];
+    }
+    avg = sum / 10;
+    
+    // 计算方差
+    for(i = 0; i < 10; i++) {
+        variance += (light_values[i] - avg) * (light_values[i] - avg);
+    }
+    variance /= 10;
+    
+    // 设置阈值为标准差的2.5倍
+    light_threshold = (u16)(2.5 * sqrt(variance));
+    
+    // 确保阈值在合理范围内
+    if(light_threshold < 50) light_threshold = 50;
+    if(light_threshold > 500) light_threshold = 500;
+}
+
+// 处理红外遥控器输入
+void Process_IR_Command(void)
+{
+	char buf[32]; // 将变量声明移到函数开头
+
+	if (hw_jsbz)
+	{ // 有红外数据接收到
+		printf("IR Code: 0x%08X\r\n", hw_jsm); // 打印接收到的红外代码
+
+		// 根据红外代码控制LED2
+		if (hw_jsm == IR_KEY1)
+		{ // 按键1
+			LED2 = 0; // 开LED2
+			printf("IR Key 1: LED2 ON\r\n");
+
+			// 更新显示
+			LCD_Fill(10, 320, 220, 336, WHITE);
+			sprintf(buf, "LED2: %s", LED2 ? "OFF" : "ON");
+			LCD_ShowString(10, 320, 220, 16, 16, (u8 *)buf);
+		}
+		else if (hw_jsm == IR_KEY2)
+		{ // 按键2
+			LED2 = 1; // 关LED2
+			printf("IR Key 2: LED2 OFF\r\n");
+
+			// 更新显示
+			LCD_Fill(10, 320, 220, 336, WHITE);
+			sprintf(buf, "LED2: %s", LED2 ? "OFF" : "ON");
+			LCD_ShowString(10, 320, 220, 16, 16, (u8 *)buf);
+		}
+		
+		hw_jsbz = 0; // 处理完成，清除标志
+	}
 }
 
 // 蓝牙数据处理函数
@@ -320,6 +402,12 @@ void bluetooth_cmd_handler(char *cmd)
     }
 }
 
+// Bluetooth_Send函数实现
+void Bluetooth_Send(const char *msg)
+{
+    u3_printf("%s\r\n", msg);
+}
+
 // 发送设备状态函数
 void send_device_status(void)
 {
@@ -432,39 +520,26 @@ void check_environment(void)
     }
 }
 
-// 处理红外遥控器输入
-void Process_IR_Command(void)
+// 处理服药逻辑函数
+void handle_medication(void)
 {
-	char buf[32]; // 将变量声明移到函数开头
+    // 检测到多次光敏传感器触发(表示取药动作)
+    char msg[64];
+    if (light_sensor_count >= 3)
+    {
+        medicines[system_state.next_med_index].taken = 1;
+        system_state.current_state = STATE_MED_TAKEN;
+        light_sensor_count = 0;
 
-	if (hw_jsbz)
-	{ // 有红外数据接收到
-		printf("IR Code: 0x%08X\r\n", hw_jsm); // 打印接收到的红外代码
+        // 更新基准光强值
+        light_base_value = current_light_value;
 
-		// 根据红外代码控制LED2
-		if (hw_jsm == IR_KEY1)
-		{ // 按键1
-			LED2 = 0; // 开LED2
-			printf("IR Key 1: LED2 ON\r\n");
-
-			// 更新显示
-			LCD_Fill(10, 320, 220, 336, WHITE);
-			sprintf(buf, "LED2: %s", LED2 ? "OFF" : "ON");
-			LCD_ShowString(10, 320, 220, 16, 16, (u8 *)buf);
-		}
-		else if (hw_jsm == IR_KEY2)
-		{ // 按键2
-			LED2 = 1; // 关LED2
-			printf("IR Key 2: LED2 OFF\r\n");
-
-			// 更新显示
-			LCD_Fill(10, 320, 220, 336, WHITE);
-			sprintf(buf, "LED2: %s", LED2 ? "OFF" : "ON");
-			LCD_ShowString(10, 320, 220, 16, 16, (u8 *)buf);
-		}
-		
-		hw_jsbz = 0; // 处理完成，清除标志
-	}
+        // 发送蓝牙消息通知手机端
+        sprintf(msg, "MED_TAKEN:%s,%02d:%02d",
+                medicines[system_state.next_med_index].name,
+                calendar.hour, calendar.min);
+        Bluetooth_Send(msg);
+    }
 }
 
 // 优化显示主界面函数
@@ -473,7 +548,7 @@ void show_home_screen(void)
     char time_str[20];
     char med_info[40];
     char env_status[30];
-
+		char light_str[20];
     // 只在需要时清屏和重绘
     if (force_refresh || last_screen != 0)
     {
@@ -496,7 +571,9 @@ void show_home_screen(void)
 
         last_screen = 0;
     }
-
+		
+		// 显示光照强度（每次刷新都更新）
+		
     // 只在时间变化时更新时间显示（只在分钟变化时更新）
     if (force_refresh || last_minute_display != calendar.min)
     {
@@ -573,7 +650,7 @@ void show_environment_screen(void)
 {
     char temp_str[20];
     char humi_str[20];
-
+		char light_str[20];
     // 只在屏幕切换时重新绘制
     if (force_refresh || last_screen != 2)
     {
@@ -584,11 +661,13 @@ void show_environment_screen(void)
 
         sprintf(temp_str, "Temp: %.1fC", system_state.temperature);
         sprintf(humi_str, "Humi: %.1f%%", system_state.humidity);
+				sprintf(light_str, "Light: %d%%", system_state.light_intensity);
         FRONT_COLOR = BLACK;
         LCD_ShowString(80, 60, 200, 30, 24, (u8 *)temp_str);
         LCD_ShowString(80, 90, 200, 30, 24, (u8 *)humi_str);
-
-        if (system_state.env_alert)
+				LCD_ShowString(80, 120, 200, 30, 24, (u8 *)light_str);
+        
+				if (system_state.env_alert)
         {
             LCD_ShowString(60, 150, 200, 30, 24, (u8 *)"Env Alert!");
             LCD_ShowString(30, 180, 200, 30, 16, (u8 *)"Please check!");
@@ -603,6 +682,8 @@ void show_environment_screen(void)
         LCD_ShowString(20, 260, 200, 30, 16, (u8 *)"KEY_UP: Return");
         last_screen = 2;
     }
+		
+		
 }
 
 // 优化警报显示函数
@@ -704,6 +785,7 @@ void show_alert_screen(u8 alert_type)
 // main函数变量声明提前
 int main(void)
 {
+    // === 所有变量声明在可执行语句之前 ===
     u8 last_minute = 0;
     u8 last_second = 0;
     u8 current_screen = 0;
@@ -711,13 +793,22 @@ int main(void)
     char msg[64];
     u8 current_minute;
     u8 current_second;
-    static u8 debug_counter = 0; // 移到函数开头
-    u8 i;                        // 用于for循环的变量
+    static u8 debug_counter = 0;
+    static u8 light_sensor_timer = 0;
+    u8 i;
+    u8 light_base_value;  // 光敏基准值
+    u8 light_threshold;   // 光敏阈值
+    u8 diff;              // 光敏差值
+    u16 hc05_timer = 0;  // HC05定时器
+    char sendbuf[64];    // 发送缓冲区
+    u16 reclen;          // 接收长度
+    static u8 light_values[10]; // 光敏值历史记录
+    u8 light_index = 0;
+    u16 sum;             // 光敏值总和
+    u8 avg;              // 光敏平均值
+    u16 variance;        // 光敏方差
 
-    // HC05控制相关变量
-    static u8 hc05_timer = 0; // HC05定时器
-    char sendbuf[32];         // 蓝牙发送缓冲区
-    u8 reclen = 0;            // 接收数据长度
+    // 初始化系统
     SysTick_Init(72);
     NVIC_PriorityGroupConfig(NVIC_PriorityGroup_2);
     LED_Init();
@@ -730,25 +821,34 @@ int main(void)
     BEEP_Init();
     HC05_Init();
     system_init();
-    Hwjs_Init(); // 初始化红外遥控模块
+		Hwjs_Init();
+    
+    // 初始化光敏传感器
+    Lsens_Init();
+    light_base_value = 50;  // 初始基准值设为50%
+    light_threshold = 20;   // 阈值设为20%
+    
+    // 显示启动界面
     LCD_Clear(BLUE);
     FRONT_COLOR = WHITE;
     LCD_ShowString(40, 100, 200, 40, 32, (u8 *)"Smart Medicine Box");
     LCD_ShowString(20, 150, 200, 30, 24, (u8 *)"System Starting...");
     LCD_ShowString(20, 180, 200, 30, 16, (u8 *)"Bluetooth Ready");
+    LCD_ShowString(20, 200, 200, 30, 16, (u8 *)"Light Sensor Init");
     delay_ms(2000);
 
     // 发送蓝牙连接成功消息
     Bluetooth_Send("SYSTEM_READY");
     printf("=== Smart Medicine Box Started ===\r\n");
+    printf("Light Sensor Base Value: %d%%\r\n", light_base_value);
     printf("Bluetooth Ready - Waiting for Commands...\r\n");
 
     while (1)
     {
         current_minute = calendar.min;
         current_second = calendar.sec;
-
-        // 红外遥控处理逻辑
+        
+			// 红外遥控处理逻辑
         if(hw_jsbz) // 红外接收到一帧数据
         {
             u32 code = hw_jsm; // 读取红外码
@@ -772,14 +872,83 @@ int main(void)
                     break;
             }
         }
+				
+			
+        // 读取当前光敏传感器值 (0-100范围)
+				system_state.light_intensity = Lsens_Get_Val();
+        
+        // 每10秒更新一次光强阈值
+        if (++light_sensor_timer >= 100) // 100 * 100ms = 10秒
+        {
+            // 保存当前值
+            light_values[light_index] = system_state.light_intensity;
+            light_index = (light_index + 1) % 10;
+            
+            // 计算平均值
+            sum = 0;
+            for(i = 0; i < 10; i++) {
+                sum += light_values[i];
+            }
+            avg = sum / 10;
+            
+            // 计算方差
+            variance = 0;
+            for(i = 0; i < 10; i++) {
+                diff = (light_values[i] > avg) ? 
+                     (light_values[i] - avg) : 
+                     (avg - light_values[i]);
+                variance += diff * diff;
+            }
+            variance /= 10;
+            
+            // 设置阈值
+            light_threshold = (u8)(1.5 * variance);
+            if(light_threshold < 10) light_threshold = 10;  // 最小阈值
+            if(light_threshold > 40) light_threshold = 40; // 最大阈值
+            
+            light_sensor_timer = 0;
+        }
+        
+        // 检测光照变化（取药动作）
+        diff = (system_state.light_intensity > light_base_value) ? 
+             (system_state.light_intensity - light_base_value) : 
+             (light_base_value - system_state.light_intensity);
+        
+        if (diff > light_threshold) 
+        {
+            light_sensor_count++;
+            light_base_value = system_state.light_intensity; // 更新基准值
+            
+            // 调试输出
+            printf("Light Change: %d%% (Base:%d%%, Thres:%d%%)\r\n", 
+                  current_light_value, light_base_value, light_threshold);
+            
+            delay_ms(200); // 避免连续计数
+        }
 
-        // 处理蓝牙数据（主要方法）
+				// 处理蓝牙数据（主要方法）
         bluetooth_data_process();
-
+				
         // 简单蓝牙测试（备用方法）
         simple_bluetooth_test();
 
         // 调试信息：每10秒显示一次USART3接收状态
+        if (++debug_counter >= 100) // 100 * 100ms = 10秒
+        {
+            debug_counter = 0;
+            printf("USART3 Status: RX_STA=0x%04X, DataLen=%d\r\n",
+                   USART3_RX_STA, USART3_RX_STA & 0x7FFF);
+            if ((USART3_RX_STA & 0x7FFF) > 0)
+            {
+                printf("RX Buffer Content: ");
+                for (i = 0; i < (USART3_RX_STA & 0x7FFF) && i < 20; i++)
+                {
+                    printf("0x%02X ", USART3_RX_BUF[i]);
+                }
+                printf("\r\n");
+            }
+        }
+				 // 调试信息：每10秒显示一次USART3接收状态
         if (++debug_counter >= 100) // 100 * 100ms = 10秒
         {
             debug_counter = 0;
@@ -819,7 +988,6 @@ int main(void)
             hc05_timer = 0;
         }
 
-        // 处理蓝牙接收数据（显示功能）
         if (USART3_RX_STA & 0x8000) // 接收到一次数据了
         {
             if (current_screen == 0) // 仅在主界面显示接收数据
@@ -855,33 +1023,51 @@ int main(void)
              BEEP = 1;           // 蜂鸣器响
         LED1 = !LED1;       // LED闪烁(500ms周期)
         LED2 = 0;
+        handle_medication(); // 处理服药动作
         
         // 每5秒发送一次提醒
-        if (current_second % 5 == 0 && last_second != current_second) {
-            sprintf(msg, "ALARM:%s,%02d:%02d", 
-                   medicines[system_state.next_med_index].name,
-                   medicines[system_state.next_med_index].hour,
-                   medicines[system_state.next_med_index].minute);
-            Bluetooth_Send(msg);
+            if (current_minute != last_minute)
+        {
+            check_medication_time();
+            check_environment();
+            last_minute = current_minute;
+            force_refresh = 1; // 标记需要刷新显示
         }
+			}
+        // 设备控制逻辑 - 区分系统警报和蓝牙控制
+        if (system_state.current_state == STATE_ALARM)
+        {
+            BEEP = 1;           // 蜂鸣器响
+            LED1 = !LED1;       // LED闪烁(500ms周期)
+            LED2 = 0;
+            handle_medication(); // 处理服药动作
+            
+            // 每5秒发送一次提醒
+            if (current_second % 5 == 0 && last_second != current_second) {
+                sprintf(msg, "ALARM:%s,%02d:%02d", 
+                       medicines[system_state.next_med_index].name,
+                       medicines[system_state.next_med_index].hour,
+                       medicines[system_state.next_med_index].minute);
+                Bluetooth_Send(msg);
+            }
         }
         else if (system_state.current_state == STATE_ENV_ALERT)
         {
             BEEP = (current_second % 2); // 蜂鸣器间歇响(1秒周期)
-        LED1 = 0;
-        LED2 = 1;           // LED2常亮
-        
-        // 每10秒发送一次环境警报
-        if (current_second % 10 == 0 && last_second != current_second) {
-            if (system_state.temperature > 30.0) {
-                sprintf(msg, "ENV_ALERT:HIGH_TEMP,%.1fC", system_state.temperature);
-            } else if (system_state.temperature < 10.0) {
-                sprintf(msg, "ENV_ALERT:LOW_TEMP,%.1fC", system_state.temperature);
-            } else {
-                sprintf(msg, "ENV_ALERT:HIGH_HUMI,%.1f%%", system_state.humidity);
+            LED1 = 0;
+            LED2 = 1;           // LED2常亮
+            
+            // 每10秒发送一次环境警报
+            if (current_second % 10 == 0 && last_second != current_second) {
+                if (system_state.temperature > 30.0) {
+                    sprintf(msg, "ENV_ALERT:HIGH_TEMP,%.1fC", system_state.temperature);
+                } else if (system_state.temperature < 10.0) {
+                    sprintf(msg, "ENV_ALERT:LOW_TEMP,%.1fC", system_state.temperature);
+                } else {
+                    sprintf(msg, "ENV_ALERT:HIGH_HUMI,%.1f%%", system_state.humidity);
+                }
+                Bluetooth_Send(msg);
             }
-            Bluetooth_Send(msg);
-        }
         }
         else
         {
@@ -994,14 +1180,9 @@ int main(void)
         {
             show_alert_screen(system_state.current_state);
         }
-        // Bluetooth_Process(); // 注释掉未定义的蓝牙处理函数
+        
         // 重置强制刷新标志
         force_refresh = 0;
         delay_ms(100);
     }
-}
-// 只保留Bluetooth_Send的实现
-void Bluetooth_Send(const char *msg)
-{
-    u3_printf("%s\r\n", msg);
 }
