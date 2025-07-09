@@ -15,7 +15,7 @@
 #include "usart3.h"
 #include "stm32f10x_exti.h" // 外部中断相关
 #include "misc.h"           // NVIC相关
-
+#include "hwjs.h"
 // 系统状态定义
 #define STATE_NORMAL 0
 #define STATE_ALARM 1
@@ -32,6 +32,30 @@
 #define BT_CMD_STATUS "STATUS"
 #define BT_CMD_MED_CHECK "MED_CHECK"
 #define BT_CMD_ENV_CHECK "ENV_CHECK"
+
+
+// 红外遥控按键编码
+#define IR_KEYa 0x00FFA25D // 按键开关的编码
+#define IR_KEYb 0x00FF629D // 按键mode的编码
+#define IR_KEYc 0x00FFE21D // 按键静音的编码
+#define IR_KEYd 0x00FF22DD // 按键快进的编码
+#define IR_KEYe 0x00FF02FD // 按键上一首的编码
+#define IR_KEYf 0x00FFC23D // 按键下一首的编码
+#define IR_KEYg 0x00FFE01F // 按键EQ的编码
+#define IR_KEYh 0x00FFA857 // 按键VOL-的编码
+#define IR_KEYi 0x00FF906F // 按键VOL+的编码
+#define IR_KEY0 0x00FF6897 // 按键0的编码
+#define IR_KEYj 0x00FF9867 // 按键RPT的编码
+#define IR_KEYk 0x00FFB04F // 按键U/SD的编码
+#define IR_KEY1 0x00FF30CF // 按键1的编码（根据实际遥控器可能需要修改）
+#define IR_KEY2 0x00FF18E7 // 按键2的编码（根据实际遥控器可能需要修改）
+#define IR_KEY3 0x00FF7A85 // 按键3的编码
+#define IR_KEY4 0x00FF10EF // 按键4的编码
+#define IR_KEY5 0x00FF38C7 // 按键5的编码
+#define IR_KEY6 0x00FF5AA5 // 按键6的编码
+#define IR_KEY7 0x00FF42BD // 按键7的编码 
+#define IR_KEY8 0x00FF4AB5 // 按键8的编码 
+#define IR_KEY9 0x00FF52AD // 按键9的编码
 
 // 药物信息结构体
 typedef struct
@@ -408,34 +432,39 @@ void check_environment(void)
     }
 }
 
-// 外部中断处理函数(红外传感器)
-void EXTI0_IRQHandler(void)
+// 处理红外遥控器输入
+void Process_IR_Command(void)
 {
-    if (EXTI_GetITStatus(EXTI_Line0) != RESET)
-    {
-        ir_sensor_count++;
-        EXTI_ClearITPendingBit(EXTI_Line0);
-    }
-}
+	char buf[32]; // 将变量声明移到函数开头
 
-// 处理服药逻辑函数
-void handle_medication(void)
-{
-    // 检测到多次红外传感器触发(表示取药动作)
-    char msg[64];
-    if (ir_sensor_count >= 3)
-    {
-        medicines[system_state.next_med_index].taken = 1;
-        system_state.current_state = STATE_MED_TAKEN;
-        ir_sensor_count = 0;
+	if (hw_jsbz)
+	{ // 有红外数据接收到
+		printf("IR Code: 0x%08X\r\n", hw_jsm); // 打印接收到的红外代码
 
-        // 发送蓝牙消息通知手机端
+		// 根据红外代码控制LED2
+		if (hw_jsm == IR_KEY1)
+		{ // 按键1
+			LED2 = 0; // 开LED2
+			printf("IR Key 1: LED2 ON\r\n");
 
-        sprintf(msg, "MED_TAKEN:%s,%02d:%02d",
-                medicines[system_state.next_med_index].name,
-                calendar.hour, calendar.min);
-        Bluetooth_Send(msg);
-    }
+			// 更新显示
+			LCD_Fill(10, 320, 220, 336, WHITE);
+			sprintf(buf, "LED2: %s", LED2 ? "OFF" : "ON");
+			LCD_ShowString(10, 320, 220, 16, 16, (u8 *)buf);
+		}
+		else if (hw_jsm == IR_KEY2)
+		{ // 按键2
+			LED2 = 1; // 关LED2
+			printf("IR Key 2: LED2 OFF\r\n");
+
+			// 更新显示
+			LCD_Fill(10, 320, 220, 336, WHITE);
+			sprintf(buf, "LED2: %s", LED2 ? "OFF" : "ON");
+			LCD_ShowString(10, 320, 220, 16, 16, (u8 *)buf);
+		}
+		
+		hw_jsbz = 0; // 处理完成，清除标志
+	}
 }
 
 // 优化显示主界面函数
@@ -701,6 +730,7 @@ int main(void)
     BEEP_Init();
     HC05_Init();
     system_init();
+    Hwjs_Init(); // 初始化红外遥控模块
     LCD_Clear(BLUE);
     FRONT_COLOR = WHITE;
     LCD_ShowString(40, 100, 200, 40, 32, (u8 *)"Smart Medicine Box");
@@ -717,6 +747,31 @@ int main(void)
     {
         current_minute = calendar.min;
         current_second = calendar.sec;
+
+        // 红外遥控处理逻辑
+        if(hw_jsbz) // 红外接收到一帧数据
+        {
+            u32 code = hw_jsm; // 读取红外码
+            u8 key_value;      // 声明提前到最前面
+            hw_jsbz = 0;       // 清零标志，准备下一次接收
+
+            printf("IR code: 0x%08X\r\n", code); // 串口打印，方便调试
+
+            key_value = code & 0xFF; // 取最低8位作为按键码
+
+            switch(key_value)
+            {
+                case 0xCF: // 示例：遥控器某个键
+                    system_state.bt_led1_ctrl = 1;
+                    LED1 = 0;
+                    printf("IR: LED1 ON\r\n");
+                    break;
+                // 可继续添加其他按键功能
+                default:
+                    printf("IR: Unknown key\r\n");
+                    break;
+            }
+        }
 
         // 处理蓝牙数据（主要方法）
         bluetooth_data_process();
@@ -800,7 +855,6 @@ int main(void)
              BEEP = 1;           // 蜂鸣器响
         LED1 = !LED1;       // LED闪烁(500ms周期)
         LED2 = 0;
-        handle_medication(); // 处理服药动作
         
         // 每5秒发送一次提醒
         if (current_second % 5 == 0 && last_second != current_second) {
